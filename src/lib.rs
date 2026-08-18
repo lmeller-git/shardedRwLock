@@ -6,6 +6,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use crossbeam_utils::CachePadded;
 use lope::{
     BoxedArm, BoxedLope, Collection, IODescription, NewSized,
     schedule::{Hooked, Schedule},
@@ -13,18 +14,18 @@ use lope::{
 };
 
 #[derive(Debug, Default)]
-pub struct ReaderShard<T>(AtomicUsize, PhantomData<T>);
+pub struct ReaderShard<T>(CachePadded<AtomicUsize>, PhantomData<T>);
 
 impl<T> NewSized<1> for ReaderShard<T> {
     fn with_capacity() -> Self {
-        Self(AtomicUsize::new(0), PhantomData)
+        Self(AtomicUsize::new(0).into(), PhantomData)
     }
 }
 
 pub struct LockInput<'a, T> {
-    pub writer: &'a AtomicBool,
-    pub data: NonNull<UnsafeCell<T>>,
-    pub _marker: PhantomData<&'a ()>,
+    writer: &'a AtomicBool,
+    data: NonNull<UnsafeCell<T>>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, T> Copy for LockInput<'a, T> {}
@@ -175,9 +176,9 @@ where
 }
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-struct RWLockScheduler<S>(S);
+struct RwLockScheduler<S>(S);
 
-impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RWLockScheduler<S> {
+impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RwLockScheduler<S> {
     type Arm = S::Arm;
 
     fn choose_offer_shard(
@@ -251,16 +252,29 @@ impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RWLockSchedule
 }
 
 pub struct ShardedRwLock<T, S: Schedule<ReaderShard<T>>> {
-    shards: BoxedLope<ReaderShard<T>, RWLockScheduler<S>, 1>,
+    shards: BoxedLope<ReaderShard<T>, RwLockScheduler<S>, 1>,
     writer: AtomicBool,
     item: UnsafeCell<T>,
 }
 
-unsafe impl<T: Send + Sync, S: Schedule<ReaderShard<T>>> Sync for ShardedRwLock<T, S> {}
-unsafe impl<T: Send + Sync, S: Schedule<ReaderShard<T>>> Send for ShardedRwLock<T, S> {}
+impl<T, S> ShardedRwLock<T, S>
+where
+    S: Schedule<ReaderShard<T>> + Default,
+{
+    pub fn new(shard_count: usize, item: T) -> Self {
+        Self {
+            shards: BoxedLope::new(shard_count),
+            writer: AtomicBool::new(false),
+            item: UnsafeCell::new(item),
+        }
+    }
+}
+
+unsafe impl<T: Sync, S: Schedule<ReaderShard<T>>> Sync for ShardedRwLock<T, S> {}
+unsafe impl<T: Send, S: Schedule<ReaderShard<T>>> Send for ShardedRwLock<T, S> {}
 
 pub struct ShardedRwLockHandle<'a, T, S: Schedule<ReaderShard<T>>> {
-    shards_handle: BoxedArm<'a, ReaderShard<T>, RWLockScheduler<S>, 1>,
+    shards_handle: BoxedArm<'a, ReaderShard<T>, RwLockScheduler<S>, 1>,
     parent: &'a ShardedRwLock<T, S>,
 }
 
@@ -275,6 +289,7 @@ where
         }
     }
 }
+
 impl<'a, T, S: Schedule<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
     pub fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>> {
         self.shards_handle
