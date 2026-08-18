@@ -1,0 +1,7 @@
+[package]
+name = "shardedrw"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lope = { path = "../lope", features = ["std"] }
