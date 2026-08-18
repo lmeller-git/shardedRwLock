@@ -1,14 +1,14 @@
 use std::{
     cell::UnsafeCell,
     marker::PhantomData,
-    ops::{Deref, DerefMut, Index},
+    ops::{Deref, DerefMut},
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use lope::{
     BoxedArm, BoxedLope, Collection, IODescription, NewSized,
-    schedule::{Hook, Hooked, Schedule},
+    schedule::{Hooked, Schedule},
     storage::StorageBackend,
 };
 
@@ -174,128 +174,34 @@ where
     }
 }
 
-#[allow(unreachable_pub)]
-pub struct StorageView<'a, B, T, K> {
-    b: &'a B,
-    _phantom: PhantomData<(&'a T, &'a K)>,
-}
-
-impl<'a, B, T, K> StorageView<'a, B, T, K> {
-    fn new(b: &'a B) -> Self {
-        Self {
-            b,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<'a, B: Index<usize>, T, K> Index<usize> for StorageView<'a, B, T, K>
-where
-    B::Output: View<'a, T>,
-{
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        self.b[index].project()
-    }
-}
-
-impl<'b, B, T, K> StorageBackend<T> for StorageView<'b, B, T, K>
-where
-    B: StorageBackend<K>,
-    K: View<'b, T>,
-{
-    type Rebind<U> = B::Rebind<U>;
-
-    fn len(&self) -> usize {
-        self.b.len()
-    }
-
-    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a T>
-    where
-        T: 'a,
-    {
-        self.b.iter().map(|i| i.project())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.b.is_empty()
-    }
-
-    fn map_to_buffer<U>(&self, f: impl Fn(usize) -> U) -> Self::Rebind<U> {
-        self.b.map_to_buffer(f)
-    }
-}
-
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
 struct RWLockScheduler<S>(S);
 
-#[allow(unnameable_types)]
-pub struct RwLockarm<A> {
-    a: A,
-}
-
-#[allow(unnameable_types)]
-#[derive(Default, Debug)]
-pub struct RwSchedulerState<S> {
-    s: S,
-    e: AtomicUsize,
-}
-
-impl<'a, S> View<'a, S> for RwSchedulerState<S> {
-    fn project(&'a self) -> &'a S {
-        &self.s
-    }
-}
-
-impl<A: Hooked> Hooked for RwLockarm<A> {
-    type State = RwSchedulerState<A::State>;
-}
-
-impl<T: Hook> Hook for RwSchedulerState<T> {
-    fn on_offer_succ(&self) {
-        self.s.on_offer_succ();
-    }
-
-    fn on_poll_succ(&self) {
-        self.s.on_poll_succ();
-    }
-}
-
 impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RWLockScheduler<S> {
-    type Arm = RwLockarm<S::Arm>;
+    type Arm = S::Arm;
 
     fn choose_offer_shard(
         &self,
         state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
         arm: &mut Self::Arm,
     ) -> usize {
-        let idx = self
-            .0
-            .choose_offer_shard(&StorageView::new(state), &mut arm.a);
-        state[idx].e.fetch_add(1, Ordering::Release);
-        idx
+        self.0.choose_offer_shard(state, arm)
     }
 
     fn choose_poll_shard(
         &self,
-        choose_to: &impl StorageBackend<<Self::Arm as Hooked>::State>,
+        state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
         arm: &mut Self::Arm,
     ) -> usize {
-        self.0
-            .choose_poll_shard(&StorageView::new(choose_to), &mut arm.a)
+        self.0.choose_poll_shard(state, arm)
     }
 
     fn fork_arm(&self, arm: &mut Self::Arm) -> Self::Arm {
-        RwLockarm {
-            a: self.0.fork_arm(&mut arm.a),
-        }
+        self.0.fork_arm(arm)
     }
 
     fn create_arm(&self) -> Self::Arm {
-        RwLockarm {
-            a: self.0.create_arm(),
-        }
+        self.0.create_arm()
     }
 
     fn collect<'b, 'c>(
@@ -410,7 +316,7 @@ mod tests {
 
     pub struct TestArm;
     impl Hooked for TestArm {
-        type State = RwSchedulerState<()>;
+        type State = ();
     }
 
     impl<T> Schedule<ReaderShard<T>> for TestScheduler {
