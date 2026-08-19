@@ -9,7 +9,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 #[allow(unused_imports)]
-use lope::schedule::{Hooked, RandomAccess, RoundRobin, Schedule};
+use kasino::strategy::{Hooked, RandomAccess, RoundRobin};
 use shardedrw::ShardedRwLock;
 
 const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8];

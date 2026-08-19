@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lope = { git = "https://github.com/lmeller-git/lope", features = ["std"] }
+kasino = { git = "https://github.com/lmeller-git/Kasino", features = ["std"] }
 crossbeam-utils = { version = "0.8.21", default-features = false }
 
 [dev-dependencies]

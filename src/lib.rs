@@ -7,10 +7,10 @@ use std::{
 };
 
 use crossbeam_utils::CachePadded;
-use lope::{
-    BoxedArm, BoxedLope, Collection, IODescription, NewSized,
-    schedule::{Hooked, Schedule},
+use kasino::{
+    BoxedBandit, BoxedBanditHandle, Collection, Signature, WithCapacity,
     storage::StorageBackend,
+    strategy::{Hooked, Strategy},
 };
 
 #[derive(Debug)]
@@ -22,7 +22,7 @@ impl<T> Default for ReaderShard<T> {
     }
 }
 
-impl<T> NewSized<1> for ReaderShard<T> {
+impl<T> WithCapacity<1> for ReaderShard<T> {
     fn with_capacity() -> Self {
         Self(AtomicUsize::new(0).into(), PhantomData)
     }
@@ -61,7 +61,7 @@ impl<'a, 'b, T> Drop for ReaderGuard<'a, 'b, T> {
 
 pub struct ReaderShardOffer<T>(PhantomData<T>);
 
-impl<T> IODescription for ReaderShardOffer<T> {
+impl<T> Signature for ReaderShardOffer<T> {
     type Input<'a> = LockInput<'a, T>;
     type Output<'a, 'b>
         = ReaderGuard<'a, 'b, T>
@@ -100,7 +100,7 @@ impl<'a, T> Drop for WriteGuard<'a, T> {
 
 pub struct WritePoll<T>(PhantomData<T>);
 
-impl<T> IODescription for WritePoll<T> {
+impl<T> Signature for WritePoll<T> {
     type Input<'a> = LockInput<'a, T>;
     type Output<'a, 'b>
         = WriteGuard<'a, T>
@@ -113,15 +113,15 @@ impl<T> IODescription for WritePoll<T> {
 }
 
 impl<T> Collection for ReaderShard<T> {
-    type OfferIO = ReaderShardOffer<T>;
-    type PollIO = WritePoll<T>;
+    type OfferSignature = ReaderShardOffer<T>;
+    type PollSignature = WritePoll<T>;
 
     fn offer<'b, 'a>(
         &'b self,
-        item: <Self::OfferIO as IODescription>::Input<'a>,
+        item: <Self::OfferSignature as Signature>::Input<'a>,
     ) -> Result<
-        <Self::OfferIO as IODescription>::Output<'a, 'b>,
-        <Self::OfferIO as IODescription>::Error<'a, 'b>,
+        <Self::OfferSignature as Signature>::Output<'a, 'b>,
+        <Self::OfferSignature as Signature>::Error<'a, 'b>,
     > {
         let old_writer = item.writer.load(Ordering::Acquire);
         if old_writer {
@@ -143,10 +143,10 @@ impl<T> Collection for ReaderShard<T> {
 
     fn poll<'a, 'b>(
         &'b self,
-        _input: <Self::PollIO as IODescription>::Input<'a>,
+        _input: <Self::PollSignature as Signature>::Input<'a>,
     ) -> Result<
-        <Self::PollIO as IODescription>::Output<'a, 'b>,
-        <Self::PollIO as IODescription>::Error<'a, 'b>,
+        <Self::PollSignature as Signature>::Output<'a, 'b>,
+        <Self::PollSignature as Signature>::Error<'a, 'b>,
     > {
         Err(self.0.load(Ordering::Acquire))
     }
@@ -165,42 +165,42 @@ impl<T> Collection for ReaderShard<T> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-struct RwLockScheduler<S>(S);
+struct RwLockStrategy<S>(S);
 
-impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RwLockScheduler<S> {
-    type Arm = S::Arm;
+impl<T, S: Strategy<ReaderShard<T>>> Strategy<ReaderShard<T>> for RwLockStrategy<S> {
+    type Gambler = S::Gambler;
 
-    fn choose_offer_shard(
+    fn choose_offer_arm(
         &self,
-        state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
-        arm: &mut Self::Arm,
+        state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
+        arm: &mut Self::Gambler,
     ) -> usize {
-        self.0.choose_offer_shard(state, arm)
+        self.0.choose_offer_arm(state, arm)
     }
 
-    fn choose_poll_shard(
+    fn choose_poll_arm(
         &self,
-        state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
-        arm: &mut Self::Arm,
+        state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
+        arm: &mut Self::Gambler,
     ) -> usize {
-        self.0.choose_poll_shard(state, arm)
+        self.0.choose_poll_arm(state, arm)
     }
 
-    fn fork_arm(&self, arm: &mut Self::Arm) -> Self::Arm {
-        self.0.fork_arm(arm)
+    fn fork_gambler(&self, arm: &mut Self::Gambler) -> Self::Gambler {
+        self.0.fork_gambler(arm)
     }
 
-    fn create_arm(&self) -> Self::Arm {
-        self.0.create_arm()
+    fn create_gambler(&self) -> Self::Gambler {
+        self.0.create_gambler()
     }
 
     fn collect<'b, 'c>(
         &self,
-        _state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
+        _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
         sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
-        input: <<ReaderShard<T> as Collection>::PollIO as IODescription>::Input<'b>,
+        input: <<ReaderShard<T> as Collection>::PollSignature as Signature>::Input<'b>,
     ) -> Option<(
-        <<ReaderShard<T> as Collection>::PollIO as IODescription>::Output<'b, 'c>,
+        <<ReaderShard<T> as Collection>::PollSignature as Signature>::Output<'b, 'c>,
         usize,
     )>
     where
@@ -238,19 +238,19 @@ impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RwLockSchedule
     }
 }
 
-pub struct ShardedRwLock<T, S: Schedule<ReaderShard<T>>> {
-    shards: BoxedLope<ReaderShard<T>, RwLockScheduler<S>, 1>,
+pub struct ShardedRwLock<T, S: Strategy<ReaderShard<T>>> {
+    shards: BoxedBandit<ReaderShard<T>, RwLockStrategy<S>, 1>,
     writer: AtomicBool,
     item: UnsafeCell<T>,
 }
 
 impl<T, S> ShardedRwLock<T, S>
 where
-    S: Schedule<ReaderShard<T>> + Default,
+    S: Strategy<ReaderShard<T>> + Default,
 {
     pub fn new(shard_count: usize, item: T) -> Self {
         Self {
-            shards: BoxedLope::new(shard_count),
+            shards: BoxedBandit::new(shard_count),
             writer: AtomicBool::new(false),
             item: UnsafeCell::new(item),
         }
@@ -258,21 +258,21 @@ where
 
     pub fn new_root(&self) -> ShardedRwLockHandle<'_, T, S> {
         ShardedRwLockHandle {
-            shards_handle: self.shards.new_root(),
+            shards_handle: self.shards.buy_in(),
             parent: self,
         }
     }
 }
 
-unsafe impl<T: Sync, S: Schedule<ReaderShard<T>> + Sync> Sync for ShardedRwLock<T, S> {}
-unsafe impl<T: Send, S: Schedule<ReaderShard<T>> + Send> Send for ShardedRwLock<T, S> {}
+unsafe impl<T: Sync, S: Strategy<ReaderShard<T>> + Sync> Sync for ShardedRwLock<T, S> {}
+unsafe impl<T: Send, S: Strategy<ReaderShard<T>> + Send> Send for ShardedRwLock<T, S> {}
 
-pub struct ShardedRwLockHandle<'a, T, S: Schedule<ReaderShard<T>>> {
-    shards_handle: BoxedArm<'a, ReaderShard<T>, RwLockScheduler<S>, 1>,
+pub struct ShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>> {
+    shards_handle: BoxedBanditHandle<'a, ReaderShard<T>, RwLockStrategy<S>, 1>,
     parent: &'a ShardedRwLock<T, S>,
 }
 
-impl<'a, T, S: Schedule<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
+impl<'a, T, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
     pub fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>> {
         self.shards_handle
             .offer(LockInput {
@@ -305,49 +305,49 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    // --- Minimal Mock Scheduler for Testing ---
+    // --- Minimal Mock Strategyr for Testing ---
     #[derive(Default, Debug, Clone, Copy)]
-    struct TestScheduler;
+    struct TestStrategy;
 
     pub struct TestArm;
     impl Hooked for TestArm {
-        type State = ();
+        type Stake = ();
     }
 
-    impl<T> Schedule<ReaderShard<T>> for TestScheduler {
-        type Arm = TestArm;
+    impl<T> Strategy<ReaderShard<T>> for TestStrategy {
+        type Gambler = TestArm;
 
-        fn choose_offer_shard(
+        fn choose_offer_arm(
             &self,
-            _state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
-            _arm: &mut Self::Arm,
+            _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
+            _arm: &mut Self::Gambler,
         ) -> usize {
             0
         }
 
-        fn choose_poll_shard(
+        fn choose_poll_arm(
             &self,
-            _choose_to: &impl StorageBackend<<Self::Arm as Hooked>::State>,
-            _arm: &mut Self::Arm,
+            _choose_to: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
+            _arm: &mut Self::Gambler,
         ) -> usize {
             0
         }
 
-        fn fork_arm(&self, _arm: &mut Self::Arm) -> Self::Arm {
+        fn fork_gambler(&self, _arm: &mut Self::Gambler) -> Self::Gambler {
             TestArm
         }
 
-        fn create_arm(&self) -> Self::Arm {
+        fn create_gambler(&self) -> Self::Gambler {
             TestArm
         }
 
         fn collect<'b, 'c>(
             &self,
-            _state: &impl StorageBackend<<Self::Arm as Hooked>::State>,
+            _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
             _sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
-            _input: <<ReaderShard<T> as Collection>::PollIO as IODescription>::Input<'b>,
+            _input: <<ReaderShard<T> as Collection>::PollSignature as Signature>::Input<'b>,
         ) -> Option<(
-            <<ReaderShard<T> as Collection>::PollIO as IODescription>::Output<'b, 'c>,
+            <<ReaderShard<T> as Collection>::PollSignature as Signature>::Output<'b, 'c>,
             usize,
         )>
         where
@@ -357,10 +357,10 @@ mod tests {
         }
     }
 
-    impl<T> ShardedRwLock<T, TestScheduler> {
+    impl<T> ShardedRwLock<T, TestStrategy> {
         pub fn test_new(val: T) -> Self {
             Self {
-                shards: BoxedLope::new(8),
+                shards: BoxedBandit::new(8),
                 writer: AtomicBool::new(false),
                 item: UnsafeCell::new(val),
             }

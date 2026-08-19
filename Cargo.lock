@@ -377,6 +377,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kasino"
+version = "0.1.0"
+source = "git+https://github.com/lmeller-git/Kasino#23b695941ec02ecac4620c185b884eaf69335513"
+dependencies = [
+ "crossbeam-utils",
+ "echeneis",
+ "loom",
+ "portable-atomic",
+ "rand 0.10.2",
+ "shuttle",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -407,19 +420,6 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "lope"
-version = "0.1.0"
-source = "git+https://github.com/lmeller-git/lope#86e0825c3f9b302d97d3882d65c07863af745644"
-dependencies = [
- "crossbeam-utils",
- "echeneis",
- "loom",
- "portable-atomic",
- "rand 0.10.2",
- "shuttle",
 ]
 
 [[package]]
@@ -752,7 +752,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "crossbeam-utils",
- "lope",
+ "kasino",
  "rand 0.10.2",
 ]
 
