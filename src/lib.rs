@@ -13,8 +13,14 @@ use lope::{
     storage::StorageBackend,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReaderShard<T>(CachePadded<AtomicUsize>, PhantomData<T>);
+
+impl<T> Default for ReaderShard<T> {
+    fn default() -> Self {
+        Self(Default::default(), PhantomData)
+    }
+}
 
 impl<T> NewSized<1> for ReaderShard<T> {
     fn with_capacity() -> Self {
@@ -25,7 +31,6 @@ impl<T> NewSized<1> for ReaderShard<T> {
 pub struct LockInput<'a, T> {
     writer: &'a AtomicBool,
     data: NonNull<UnsafeCell<T>>,
-    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, T> Copy for LockInput<'a, T> {}
@@ -72,7 +77,6 @@ impl<T> IODescription for ReaderShardOffer<T> {
 pub struct WriteGuard<'a, T> {
     b: &'a AtomicBool,
     ptr: NonNull<T>,
-    _life: PhantomData<&'a ()>,
 }
 
 impl<'a, T> Deref for WriteGuard<'a, T> {
@@ -160,21 +164,6 @@ impl<T> Collection for ReaderShard<T> {
     }
 }
 
-#[allow(unreachable_pub)]
-pub trait View<'a, T> {
-    fn project(&'a self) -> &'a T;
-}
-
-impl<'a, K, U, T> View<'a, T> for K
-where
-    K: Deref<Target = U>,
-    U: View<'a, T> + 'a,
-{
-    fn project(&'a self) -> &'a T {
-        U::project(self)
-    }
-}
-
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
 struct RwLockScheduler<S>(S);
 
@@ -217,34 +206,32 @@ impl<T, S: Schedule<ReaderShard<T>>> Schedule<ReaderShard<T>> for RwLockSchedule
     where
         ReaderShard<T>: 'c,
     {
-        for item in sub_collections.iter() {
-            let Err(c) = item.poll(input) else {
-                unreachable!();
-            };
-            if c != 0 {
-                return None;
-            }
+        fn no_reader<'b, 'c, T>(
+            sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
+            input: LockInput<'b, T>,
+        ) -> bool {
+            sub_collections
+                .iter()
+                .all(|item| matches!(item.poll(input), Err(0)))
+        }
+
+        if !no_reader(sub_collections, input) {
+            return None;
         }
 
         if input.writer.swap(true, Ordering::AcqRel) {
             return None;
         }
 
-        for item in sub_collections.iter() {
-            let Err(c) = item.poll(input) else {
-                unreachable!();
-            };
-            if c != 0 {
-                input.writer.store(false, Ordering::Release);
-                return None;
-            }
+        if !no_reader(sub_collections, input) {
+            input.writer.store(false, Ordering::Release);
+            return None;
         }
 
         Some((
             WriteGuard {
                 b: input.writer,
                 ptr: input.data.cast(),
-                _life: PhantomData,
             },
             0,
         ))
@@ -268,20 +255,7 @@ where
             item: UnsafeCell::new(item),
         }
     }
-}
 
-unsafe impl<T: Sync, S: Schedule<ReaderShard<T>>> Sync for ShardedRwLock<T, S> {}
-unsafe impl<T: Send, S: Schedule<ReaderShard<T>>> Send for ShardedRwLock<T, S> {}
-
-pub struct ShardedRwLockHandle<'a, T, S: Schedule<ReaderShard<T>>> {
-    shards_handle: BoxedArm<'a, ReaderShard<T>, RwLockScheduler<S>, 1>,
-    parent: &'a ShardedRwLock<T, S>,
-}
-
-impl<T, S: Schedule<ReaderShard<T>>> ShardedRwLock<T, S>
-where
-    S: Default,
-{
     pub fn new_root(&self) -> ShardedRwLockHandle<'_, T, S> {
         ShardedRwLockHandle {
             shards_handle: self.shards.new_root(),
@@ -290,13 +264,20 @@ where
     }
 }
 
+unsafe impl<T: Sync, S: Schedule<ReaderShard<T>> + Sync> Sync for ShardedRwLock<T, S> {}
+unsafe impl<T: Send, S: Schedule<ReaderShard<T>> + Send> Send for ShardedRwLock<T, S> {}
+
+pub struct ShardedRwLockHandle<'a, T, S: Schedule<ReaderShard<T>>> {
+    shards_handle: BoxedArm<'a, ReaderShard<T>, RwLockScheduler<S>, 1>,
+    parent: &'a ShardedRwLock<T, S>,
+}
+
 impl<'a, T, S: Schedule<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
     pub fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>> {
         self.shards_handle
             .offer(LockInput {
                 writer: &self.parent.writer,
                 data: NonNull::from(&self.parent.item),
-                _marker: PhantomData,
             })
             .ok()
     }
@@ -306,7 +287,6 @@ impl<'a, T, S: Schedule<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
             .poll(LockInput {
                 writer: &self.parent.writer,
                 data: NonNull::from(&self.parent.item),
-                _marker: PhantomData,
             })
             .ok()
     }
