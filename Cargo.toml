@@ -29,7 +29,7 @@ readme = "README.md"
 license = "MIT"
 repository = ""
 keywords = ["mpmc", "no_std", "atomic"]
-categories = ["data-structures", "algorithms", "concurrency", "no-std"]
+categories = ["data-structures", "algorithms", "concurrency", "no-std::no-alloc"]
 rust-version = "1.85.0"
 
 [features]
