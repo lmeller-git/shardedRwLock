@@ -384,6 +384,17 @@ where
 pub type BoxedShardedRwLock<T, S: Strategy<ReaderShard<T>>> =
     ShardedRwLock<T, BoxedStorage<ReaderShard<T>>, BoxedStorage<<S::Gambler as Hooked>::Stake>, S>;
 
+/// A handle to a BoxedShardedRwLock
+#[cfg(feature = "alloc")]
+#[expect(type_alias_bounds)]
+pub type BoxedShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>> = ShardedRwLockHandle<
+    'a,
+    T,
+    BoxedStorage<ReaderShard<T>>,
+    BoxedStorage<<S::Gambler as Hooked>::Stake>,
+    S,
+>;
+
 #[cfg(feature = "alloc")]
 impl<T, S> BoxedShardedRwLock<T, S>
 where
@@ -408,6 +419,17 @@ pub type InlineShardedRwLock<T, S: Strategy<ReaderShard<T>>, const N: usize> = S
     S,
 >;
 
+/// A handle to an InlineShardedRwLock
+#[expect(type_alias_bounds)]
+pub type InlineShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>, const N: usize> =
+    ShardedRwLockHandle<
+        'a,
+        T,
+        InlineStorage<ReaderShard<T>, N>,
+        InlineStorage<<S::Gambler as Hooked>::Stake, N>,
+        S,
+    >;
+
 impl<T, S, const N: usize> InlineShardedRwLock<T, S, N>
 where
     S: Strategy<ReaderShard<T>> + Default,
@@ -422,152 +444,195 @@ where
     }
 }
 
-#[cfg(all(feature = "alloc", test, not(loom), not(shuttle)))]
+#[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Arc, Barrier},
-        thread,
-    };
-
-    use kasino::strategy::DCBO;
-
     use super::*;
 
-    type TestStrategy = DCBO;
+    trait ForkeableRwLockImpl<'a, T> {
+        fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>>;
+        fn write(&mut self) -> Option<WriteGuard<'a, T>>;
+        fn fork(&mut self) -> Self;
+    }
 
-    impl<T> BoxedShardedRwLock<T, TestStrategy> {
-        pub(crate) fn test_new(val: T) -> Self {
-            Self {
-                shards: BoxedBandit::new(8),
-                writer: AtomicBool::new(false),
-                item: UnsafeCell::new(val),
+    impl<'a, T, S: Strategy<ReaderShard<T>>, const N: usize> ForkeableRwLockImpl<'a, T>
+        for InlineShardedRwLockHandle<'a, T, S, N>
+    {
+        fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>> {
+            self.read()
+        }
+
+        fn write(&mut self) -> Option<WriteGuard<'a, T>> {
+            self.write()
+        }
+
+        fn fork(&mut self) -> Self {
+            self.fork()
+        }
+    }
+
+    fn smoke<'a, L>(lock: L)
+    where
+        L: ForkeableRwLockImpl<'a, i32>,
+    {
+        todo!()
+    }
+
+    fn many_reader<'a, L>(lock: L)
+    where
+        L: ForkeableRwLockImpl<'a, i32>,
+    {
+        todo!()
+    }
+
+    fn send_sync<L>(_lock: L)
+    where
+        L: Send + Sync,
+    {
+    }
+
+    fn concurrent_read<'a, L>(lock: L)
+    where
+        L: ForkeableRwLockImpl<'a, i32>,
+    {
+        todo!()
+    }
+
+    fn concurrent_write<'a, L>(lock: L)
+    where
+        L: ForkeableRwLockImpl<'a, i32>,
+    {
+        todo!()
+    }
+
+    fn concurrent_rw<'a, L>(lock: L)
+    where
+        L: ForkeableRwLockImpl<'a, i32>,
+    {
+        todo!()
+    }
+
+    #[cfg(all(not(loom), not(shuttle)))]
+    mod core {
+        use kasino::strategy::{RandomAccess, RoundRobin};
+
+        use super::*;
+        use crate::tests::smoke;
+
+        #[test]
+        fn send_sync_inline() {
+            send_sync(InlineShardedRwLock::<_, RoundRobin, 1>::new(0).new_root());
+        }
+
+        #[cfg(feature = "alloc")]
+        fn send_sync_boxed() {
+            send_sync(BoxedShardedRwLock::<_, RoundRobin>::new(1, 0).new_root());
+        }
+
+        #[test]
+        fn smoke_impl() {
+            smoke(InlineShardedRwLock::<_, RoundRobin, 10>::new(0).new_root());
+        }
+
+        #[test]
+        fn many_reader_impl() {
+            many_reader(InlineShardedRwLock::<_, RoundRobin, 10>::new(0).new_root());
+        }
+
+        #[test]
+        fn drops_impl() {
+            struct Drops<'a> {
+                c: &'a AtomicUsize,
             }
+
+            impl<'a> Drop for Drops<'a> {
+                fn drop(&mut self) {
+                    self.c.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            let counter = AtomicUsize::new(0);
+
+            drop(InlineShardedRwLock::<_, RoundRobin, 10>::new(Drops {
+                c: &counter,
+            }));
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
+        fn concurrent_read_impl() {
+            concurrent_read(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root());
+        }
+
+        #[test]
+        fn concurrent_write_impl() {
+            concurrent_write(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root());
+        }
+
+        #[test]
+        fn concurrent_rw_impl() {
+            concurrent_rw(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root());
         }
     }
 
-    // --- Tests ---
+    #[cfg(shuttle)]
+    mod shuttle {
+        use super::*;
 
-    #[test]
-    fn test_basic_read_and_write() {
-        let lock = ShardedRwLock::test_new(42);
-        let mut handle = lock.new_root();
+        const ITER: usize = 100;
+        const DEPTH: usize = 4;
 
-        // Read initial value
-        {
-            let guard = handle.read().expect("Failed to acquire read lock");
-            assert_eq!(*guard, 42);
+        #[test]
+        fn concurrent_read_impl() {
+            shuttle::check_pct(
+                || concurrent_read(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root()),
+                ITER,
+                DEPTH,
+            )
         }
 
-        // Mutate value
-        {
-            let mut guard = handle.write().expect("Failed to acquire write lock");
-            *guard = 100;
+        #[test]
+        fn concurrent_write_impl() {
+            shuttle::check_pct(
+                || concurrent_write(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root()),
+                ITER,
+                DEPTH,
+            )
         }
 
-        // Verify mutation
-        {
-            let guard = handle.read().expect("Failed to acquire read lock");
-            assert_eq!(*guard, 100);
+        #[test]
+        fn concurrent_rw_impl() {
+            shuttle::check_pct(
+                || concurrent_rw(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root()),
+                ITER,
+                DEPTH,
+            )
         }
     }
 
-    #[test]
-    fn test_concurrent_readers() {
-        let lock = ShardedRwLock::test_new("shared data");
-        let mut h1 = lock.new_root();
-        let mut h2 = h1.fork();
+    #[cfg(loom)]
+    mod loom {
+        use super::*;
 
-        let r1 = h1.read().expect("First reader failed");
-        let r2 = h2.read().expect("Second reader failed concurrently");
-
-        assert_eq!(*r1, "shared data");
-        assert_eq!(*r2, "shared data");
-    }
-
-    #[test]
-    fn test_write_exclusion_with_active_readers() {
-        let lock = ShardedRwLock::test_new(10);
-        let mut h1 = lock.new_root();
-        let mut h2 = h1.fork();
-
-        let _reader = h1.read().expect("Reader failed");
-
-        // Write attempt must fail while reader exists
-        assert!(h2.write().is_none());
-    }
-
-    #[test]
-    fn test_exclusion_during_active_writer() {
-        let lock = ShardedRwLock::test_new(10);
-        let mut h1 = lock.new_root();
-        let mut h2 = h1.fork();
-
-        let _writer = h1.write().expect("Writer failed");
-
-        // Both read and write must fail while writer exists
-        assert!(h2.read().is_none());
-        assert!(h2.write().is_none());
-    }
-
-    #[test]
-    fn test_guard_drop_releases_lock() {
-        let lock = ShardedRwLock::test_new(0);
-        let mut h1 = lock.new_root();
-        let mut h2 = h1.fork();
-
-        let writer = h1.write().unwrap();
-        drop(writer);
-
-        // Lock freed: reader should succeed
-        let reader = h2.read();
-        assert!(reader.is_some());
-        drop(reader);
-
-        // Lock freed again: write should succeed
-        assert!(h1.write().is_some());
-    }
-
-    #[test]
-    fn test_multithreaded_contention() {
-        let lock = Arc::new(ShardedRwLock::test_new(0));
-        #[cfg(not(miri))]
-        let threads = 8;
-        #[cfg(miri)]
-        let threads = 4;
-        #[cfg(miri)]
-        let iterations = 500;
-        #[cfg(not(miri))]
-        let iterations = 1000;
-        let barrier = Arc::new(Barrier::new(threads));
-
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                let lock = Arc::clone(&lock);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    let mut handle = lock.new_root();
-                    barrier.wait();
-
-                    for _ in 0..iterations {
-                        // Spin until write acquired
-                        loop {
-                            if let Some(mut guard) = handle.write() {
-                                *guard += 1;
-                                break;
-                            }
-                            thread::yield_now();
-                        }
-                    }
-                })
+        #[test]
+        fn concurrent_read_impl() {
+            loom::model(|| {
+                concurrent_read(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root())
             })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
         }
 
-        let mut root = lock.new_root();
-        let final_guard = root.read().unwrap();
-        assert_eq!(*final_guard, threads * iterations);
+        #[test]
+        fn concurrent_write_impl() {
+            loom::model(|| {
+                concurrent_write(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root())
+            })
+        }
+
+        #[test]
+        fn concurrent_rw_impl() {
+            loom::model(|| {
+                concurrent_rw(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root())
+            })
+        }
     }
 }
