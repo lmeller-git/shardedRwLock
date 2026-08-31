@@ -1,4 +1,20 @@
-use std::{
+//! Sharded RwLock supporting generic scheduling strategies.
+
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![deny(missing_docs)]
+#![deny(clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks)]
+#![warn(unsafe_op_in_unsafe_fn)]
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
+#[allow(unused_extern_crates)]
+#[cfg(any(feature = "alloc", test))]
+extern crate alloc;
+
+mod sync;
+
+use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -8,11 +24,20 @@ use std::{
 
 use crossbeam_utils::CachePadded;
 use kasino::{
-    BoxedBandit, BoxedBanditHandle, Collection, Signature, WithCapacity,
+    Bandit,
+    BanditHandle,
+    Collection,
+    InlineBandit,
+    InlineStorage,
+    Signature,
+    WithCapacity,
     storage::StorageBackend,
     strategy::{Hooked, Strategy},
 };
+#[cfg(feature = "alloc")]
+use kasino::{BoxedBandit, BoxedStorage};
 
+/// The count of registered readers on a shard.
 #[derive(Debug)]
 pub struct ReaderShard<T>(CachePadded<AtomicUsize>, PhantomData<T>);
 
@@ -28,6 +53,7 @@ impl<T> WithCapacity<1> for ReaderShard<T> {
     }
 }
 
+/// The state used for acquiring a lock
 pub struct LockInput<'a, T> {
     writer: &'a AtomicBool,
     data: NonNull<UnsafeCell<T>>,
@@ -40,6 +66,7 @@ impl<'a, T> Clone for LockInput<'a, T> {
     }
 }
 
+/// A read-only access to the data.
 pub struct ReaderGuard<'a, 'b, T> {
     shard: &'b ReaderShard<T>,
     ptr: NonNull<T>,
@@ -48,7 +75,10 @@ pub struct ReaderGuard<'a, 'b, T> {
 
 impl<'a, 'b, T> Deref for ReaderGuard<'a, 'b, T> {
     type Target = T;
+
     fn deref(&self) -> &Self::Target {
+        // # Safety:
+        // we have acquired synchornized read access to the data and may thus deref it to a shared borow
         unsafe { self.ptr.as_ref() }
     }
 }
@@ -59,20 +89,22 @@ impl<'a, 'b, T> Drop for ReaderGuard<'a, 'b, T> {
     }
 }
 
+/// Input to Collection::offer
 pub struct ReaderShardOffer<T>(PhantomData<T>);
 
 impl<T> Signature for ReaderShardOffer<T> {
+    type Error<'a, 'b>
+        = ()
+    where
+        Self: 'b;
     type Input<'a> = LockInput<'a, T>;
     type Output<'a, 'b>
         = ReaderGuard<'a, 'b, T>
     where
         Self: 'b;
-    type Error<'a, 'b>
-        = ()
-    where
-        Self: 'b;
 }
 
+/// A reader-writer access to the data
 #[derive(Debug)]
 pub struct WriteGuard<'a, T> {
     b: &'a AtomicBool,
@@ -81,13 +113,18 @@ pub struct WriteGuard<'a, T> {
 
 impl<'a, T> Deref for WriteGuard<'a, T> {
     type Target = T;
+
     fn deref(&self) -> &Self::Target {
+        // # Safety:
+        // we have acquired synchornized mutable access to the data and may thus deref it to a shared borow
         unsafe { self.ptr.as_ref() }
     }
 }
 
 impl<'a, T> DerefMut for WriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // # Safety:
+        // we have acquired synchornized mutable access to the data and may thus deref it to an exclusive borow
         unsafe { self.ptr.as_mut() }
     }
 }
@@ -98,16 +135,17 @@ impl<'a, T> Drop for WriteGuard<'a, T> {
     }
 }
 
+/// Input to Collection::poll
 pub struct WritePoll<T>(PhantomData<T>);
 
 impl<T> Signature for WritePoll<T> {
+    type Error<'a, 'b>
+        = usize
+    where
+        Self: 'b;
     type Input<'a> = LockInput<'a, T>;
     type Output<'a, 'b>
         = WriteGuard<'a, T>
-    where
-        Self: 'b;
-    type Error<'a, 'b>
-        = usize
     where
         Self: 'b;
 }
@@ -155,7 +193,7 @@ impl<T> Collection for ReaderShard<T> {
         1
     }
 
-    fn cap(&self) -> usize {
+    fn capacity(&self) -> usize {
         1
     }
 
@@ -238,25 +276,26 @@ impl<T, S: Strategy<ReaderShard<T>>> Strategy<ReaderShard<T>> for RwLockStrategy
     }
 }
 
-pub struct ShardedRwLock<T, S: Strategy<ReaderShard<T>>> {
-    shards: BoxedBandit<ReaderShard<T>, RwLockStrategy<S>, 1>,
+///  A sharded RwLock
+pub struct ShardedRwLock<
+    T,
+    B: StorageBackend<ReaderShard<T>>,
+    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    S: Strategy<ReaderShard<T>>,
+> {
+    shards: Bandit<ReaderShard<T>, RwLockStrategy<S>, B, C, 1>,
     writer: AtomicBool,
     item: UnsafeCell<T>,
 }
 
-impl<T, S> ShardedRwLock<T, S>
+impl<T, B, C, S> ShardedRwLock<T, B, C, S>
 where
-    S: Strategy<ReaderShard<T>> + Default,
+    B: StorageBackend<ReaderShard<T>>,
+    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    S: Strategy<ReaderShard<T>>,
 {
-    pub fn new(shard_count: usize, item: T) -> Self {
-        Self {
-            shards: BoxedBandit::new(shard_count),
-            writer: AtomicBool::new(false),
-            item: UnsafeCell::new(item),
-        }
-    }
-
-    pub fn new_root(&self) -> ShardedRwLockHandle<'_, T, S> {
+    /// Acquires a new ShardedRwLockHandle to this object
+    pub fn new_root(&self) -> ShardedRwLockHandle<'_, T, B, C, S> {
         ShardedRwLockHandle {
             shards_handle: self.shards.buy_in(),
             parent: self,
@@ -264,15 +303,42 @@ where
     }
 }
 
-unsafe impl<T: Sync, S: Strategy<ReaderShard<T>> + Sync> Sync for ShardedRwLock<T, S> {}
-unsafe impl<T: Send, S: Strategy<ReaderShard<T>> + Send> Send for ShardedRwLock<T, S> {}
-
-pub struct ShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>> {
-    shards_handle: BoxedBanditHandle<'a, ReaderShard<T>, RwLockStrategy<S>, 1>,
-    parent: &'a ShardedRwLock<T, S>,
+// # Safety:
+// This is safe if all types are sync
+unsafe impl<T: Sync, B: Sync, C: Sync, S: Sync> Sync for ShardedRwLock<T, B, C, S>
+where
+    B: StorageBackend<ReaderShard<T>>,
+    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    S: Strategy<ReaderShard<T>>,
+{
 }
 
-impl<'a, T, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
+// # Safety:
+// This is safe if all types are send
+unsafe impl<T: Send, B: Send, C: Send, S: Send> Send for ShardedRwLock<T, B, C, S>
+where
+    B: StorageBackend<ReaderShard<T>>,
+    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    S: Strategy<ReaderShard<T>>,
+{
+}
+
+/// A handle to a ShardedRwLock
+pub struct ShardedRwLockHandle<'a, T, B, C, S: Strategy<ReaderShard<T>>>
+where
+    B: StorageBackend<ReaderShard<T>>,
+    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+{
+    shards_handle: BanditHandle<'a, ReaderShard<T>, RwLockStrategy<S>, B, C, 1>,
+    parent: &'a ShardedRwLock<T, B, C, S>,
+}
+
+impl<'a, T, B, C, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, B, C, S>
+where
+    B: StorageBackend<ReaderShard<T>>,
+    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+{
+    /// Attempts to acquire read only access to the data
     pub fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>> {
         self.shards_handle
             .offer(LockInput {
@@ -282,6 +348,7 @@ impl<'a, T, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
             .ok()
     }
 
+    /// Attempts to acquire reader-writer access to the data
     pub fn write(&mut self) -> Option<WriteGuard<'a, T>> {
         self.shards_handle
             .poll(LockInput {
@@ -291,6 +358,7 @@ impl<'a, T, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
             .ok()
     }
 
+    /// Creates a new ShardedRwLockHandle from this handle
     pub fn fork(&mut self) -> Self {
         Self {
             shards_handle: self.shards_handle.fork(),
@@ -299,17 +367,65 @@ impl<'a, T, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, S> {
     }
 }
 
+/// A ShardedRwLock that is dynamically stored
+#[expect(type_alias_bounds)]
+#[cfg(feature = "alloc")]
+pub type BoxedShardedRwLock<T, S: Strategy<ReaderShard<T>>> =
+    ShardedRwLock<T, BoxedStorage<ReaderShard<T>>, BoxedStorage<<S::Gambler as Hooked>::Stake>, S>;
+
+#[cfg(feature = "alloc")]
+impl<T, S> BoxedShardedRwLock<T, S>
+where
+    S: Strategy<ReaderShard<T>> + Default,
+{
+    /// Constructs a new BoxedShardedRwLock with shard count chsard_count
+    pub fn new(shard_count: usize, item: T) -> Self {
+        Self {
+            shards: BoxedBandit::new(shard_count),
+            writer: AtomicBool::new(false),
+            item: UnsafeCell::new(item),
+        }
+    }
+}
+
+/// A ShardedRwLock stored inline
+#[expect(type_alias_bounds)]
+pub type InlineShardedRwLock<T, S: Strategy<ReaderShard<T>>, const N: usize> = ShardedRwLock<
+    T,
+    InlineStorage<ReaderShard<T>, N>,
+    InlineStorage<<S::Gambler as Hooked>::Stake, N>,
+    S,
+>;
+
+impl<T, S, const N: usize> InlineShardedRwLock<T, S, N>
+where
+    S: Strategy<ReaderShard<T>> + Default,
+{
+    /// Constructs a new InlineShardedRwLock
+    pub fn new(item: T) -> Self {
+        Self {
+            shards: InlineBandit::new(),
+            writer: AtomicBool::new(false),
+            item: UnsafeCell::new(item),
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
     use super::*;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
 
     // --- Minimal Mock Strategyr for Testing ---
     #[derive(Default, Debug, Clone, Copy)]
     struct TestStrategy;
 
-    pub struct TestArm;
+    pub(crate) struct TestArm;
     impl Hooked for TestArm {
         type Stake = ();
     }
@@ -357,8 +473,8 @@ mod tests {
         }
     }
 
-    impl<T> ShardedRwLock<T, TestStrategy> {
-        pub fn test_new(val: T) -> Self {
+    impl<T> BoxedShardedRwLock<T, TestStrategy> {
+        pub(crate) fn test_new(val: T) -> Self {
             Self {
                 shards: BoxedBandit::new(8),
                 writer: AtomicBool::new(false),

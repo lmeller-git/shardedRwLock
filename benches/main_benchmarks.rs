@@ -1,3 +1,4 @@
+#[cfg(feature = "alloc")]
 use std::{
     hint::black_box,
     sync::{Arc, Barrier, RwLock as StdRwLock},
@@ -5,16 +6,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rand::{RngExt, SeedableRng, rngs::SmallRng};
-
+#[cfg(feature = "alloc")]
+use criterion::{BenchmarkId, Throughput};
+use criterion::{Criterion, criterion_group, criterion_main};
 #[allow(unused_imports)]
 use kasino::strategy::{Hooked, RandomAccess, RoundRobin};
-use shardedrw::ShardedRwLock;
+#[cfg(feature = "alloc")]
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
+#[cfg(feature = "alloc")]
+use sharded_rw_lock::BoxedShardedRwLock;
 
+#[cfg(feature = "alloc")]
 const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8];
 // 0 = all writes, 100 = all reads
+#[cfg(feature = "alloc")]
 const READ_PERCENTAGES: &[u8] = &[0, 50, 90, 99, 100];
+#[cfg(feature = "alloc")]
 const OPS_PER_THREAD: usize = 20_000;
 
 // ---------------------------------------------------------------------
@@ -23,11 +30,14 @@ const OPS_PER_THREAD: usize = 20_000;
 // timed region (post-barrier-release to all-joined).
 // ---------------------------------------------------------------------
 
+#[cfg(feature = "alloc")]
 type BenchedScheduler = RandomAccess<SmallRng>;
+#[cfg(feature = "alloc")]
 const SHARDS: usize = 8;
 
+#[cfg(feature = "alloc")]
 fn run_sharded(n_threads: usize, read_pct: u8) -> Duration {
-    let lock: ShardedRwLock<u64, BenchedScheduler> = ShardedRwLock::new(SHARDS, 0);
+    let lock: BoxedShardedRwLock<u64, BenchedScheduler> = BoxedShardedRwLock::new(SHARDS, 0);
     let mut root = lock.new_root();
 
     let barrier = Barrier::new(n_threads + 1);
@@ -71,6 +81,7 @@ fn run_sharded(n_threads: usize, read_pct: u8) -> Duration {
     start.elapsed()
 }
 
+#[cfg(feature = "alloc")]
 fn run_std(n_threads: usize, read_pct: u8) -> Duration {
     let lock = Arc::new(StdRwLock::new(0u64));
 
@@ -118,6 +129,7 @@ fn run_std(n_threads: usize, read_pct: u8) -> Duration {
 // Criterion wiring
 // ---------------------------------------------------------------------
 
+#[cfg(feature = "alloc")]
 fn bench_contention_matrix(c: &mut Criterion) {
     for &read_pct in READ_PERCENTAGES {
         let mut group = c.benchmark_group(format!("read_pct_{read_pct}"));
@@ -156,6 +168,7 @@ fn bench_contention_matrix(c: &mut Criterion) {
     }
 }
 
+#[cfg(feature = "alloc")]
 criterion_group! {
     name = benches;
     // Contention benchmarks are noisy and slow (real thread spawns per
@@ -163,4 +176,9 @@ criterion_group! {
     config = Criterion::default().sample_size(30).measurement_time(Duration::from_secs(5));
     targets = bench_contention_matrix
 }
+
+fn foo(_: &mut Criterion) {}
+
+#[cfg(not(feature = "alloc"))]
+criterion_group!(benches, foo);
 criterion_main!(benches);
