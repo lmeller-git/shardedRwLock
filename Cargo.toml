@@ -53,9 +53,6 @@ loom = { version = "0.7", features = ["checkpoint"] }
 [target.'cfg(shuttle)'.dependencies]
 shuttle = "0.9"
 
-[target.'cfg(echeneis)'.dependencies]
-echeneis = { version = "0.1", features = ["portable-atomic", "atomic-fallback"] }
-
 [lints]
 workspace = true
 

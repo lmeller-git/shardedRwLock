@@ -15,11 +15,9 @@ extern crate alloc;
 mod sync;
 
 use core::{
-    cell::UnsafeCell,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crossbeam_utils::CachePadded;
@@ -36,6 +34,11 @@ use kasino::{
 };
 #[cfg(feature = "alloc")]
 use kasino::{BoxedBandit, BoxedStorage};
+
+use crate::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    cell::UnsafeCell,
+};
 
 /// The count of registered readers on a shard.
 #[derive(Debug)]
@@ -411,67 +414,18 @@ where
     }
 }
 
-#[cfg(feature = "alloc")]
-#[cfg(test)]
+#[cfg(all(feature = "alloc", test, not(loom), not(shuttle)))]
 mod tests {
     use std::{
         sync::{Arc, Barrier},
         thread,
     };
 
+    use kasino::strategy::DCBO;
+
     use super::*;
 
-    // --- Minimal Mock Strategyr for Testing ---
-    #[derive(Default, Debug, Clone, Copy)]
-    struct TestStrategy;
-
-    pub(crate) struct TestArm;
-    impl Hooked for TestArm {
-        type Stake = ();
-    }
-
-    impl<T> Strategy<ReaderShard<T>> for TestStrategy {
-        type Gambler = TestArm;
-
-        fn choose_offer_arm(
-            &self,
-            _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
-            _arm: &mut Self::Gambler,
-        ) -> usize {
-            0
-        }
-
-        fn choose_poll_arm(
-            &self,
-            _choose_to: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
-            _arm: &mut Self::Gambler,
-        ) -> usize {
-            0
-        }
-
-        fn fork_gambler(&self, _arm: &mut Self::Gambler) -> Self::Gambler {
-            TestArm
-        }
-
-        fn create_gambler(&self) -> Self::Gambler {
-            TestArm
-        }
-
-        fn collect<'b, 'c>(
-            &self,
-            _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
-            _sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
-            _input: <<ReaderShard<T> as Collection>::PollSignature as Signature>::Input<'b>,
-        ) -> Option<(
-            <<ReaderShard<T> as Collection>::PollSignature as Signature>::Output<'b, 'c>,
-            usize,
-        )>
-        where
-            ReaderShard<T>: 'c,
-        {
-            unreachable!()
-        }
-    }
+    type TestStrategy = DCBO;
 
     impl<T> BoxedShardedRwLock<T, TestStrategy> {
         pub(crate) fn test_new(val: T) -> Self {
@@ -568,7 +522,13 @@ mod tests {
     #[test]
     fn test_multithreaded_contention() {
         let lock = Arc::new(ShardedRwLock::test_new(0));
+        #[cfg(not(miri))]
         let threads = 8;
+        #[cfg(miri)]
+        let threads = 4;
+        #[cfg(miri)]
+        let iterations = 500;
+        #[cfg(not(miri))]
         let iterations = 1000;
         let barrier = Arc::new(Barrier::new(threads));
 
