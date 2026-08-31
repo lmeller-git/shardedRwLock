@@ -56,19 +56,6 @@ impl<T> WithCapacity<1> for ReaderShard<T> {
     }
 }
 
-/// The state used for acquiring a lock
-pub struct LockInput<'a, T> {
-    writer: &'a AtomicBool,
-    data: NonNull<UnsafeCell<T>>,
-}
-
-impl<'a, T> Copy for LockInput<'a, T> {}
-impl<'a, T> Clone for LockInput<'a, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
 /// A read-only access to the data.
 pub struct ReaderGuard<'a, 'b, T> {
     shard: &'b ReaderShard<T>,
@@ -90,21 +77,6 @@ impl<'a, 'b, T> Drop for ReaderGuard<'a, 'b, T> {
     fn drop(&mut self) {
         self.shard.0.fetch_sub(1, Ordering::Release);
     }
-}
-
-/// Input to Collection::offer
-pub struct ReaderShardOffer<T>(PhantomData<T>);
-
-impl<T> Signature for ReaderShardOffer<T> {
-    type Error<'a, 'b>
-        = ()
-    where
-        Self: 'b;
-    type Input<'a> = LockInput<'a, T>;
-    type Output<'a, 'b>
-        = ReaderGuard<'a, 'b, T>
-    where
-        Self: 'b;
 }
 
 /// A reader-writer access to the data
@@ -138,144 +110,180 @@ impl<'a, T> Drop for WriteGuard<'a, T> {
     }
 }
 
-/// Input to Collection::poll
-pub struct WritePoll<T>(PhantomData<T>);
+use sealed::*;
+mod sealed {
+    use super::*;
 
-impl<T> Signature for WritePoll<T> {
-    type Error<'a, 'b>
-        = usize
-    where
-        Self: 'b;
-    type Input<'a> = LockInput<'a, T>;
-    type Output<'a, 'b>
-        = WriteGuard<'a, T>
-    where
-        Self: 'b;
-}
+    /// The state used for acquiring a lock
+    #[expect(unnameable_types)]
+    pub struct LockInput<'a, T> {
+        pub(crate) writer: &'a AtomicBool,
+        pub(crate) data: NonNull<UnsafeCell<T>>,
+    }
 
-impl<T> Collection for ReaderShard<T> {
-    type OfferSignature = ReaderShardOffer<T>;
-    type PollSignature = WritePoll<T>;
-
-    fn offer<'b, 'a>(
-        &'b self,
-        item: <Self::OfferSignature as Signature>::Input<'a>,
-    ) -> Result<
-        <Self::OfferSignature as Signature>::Output<'a, 'b>,
-        <Self::OfferSignature as Signature>::Error<'a, 'b>,
-    > {
-        let old_writer = item.writer.load(Ordering::Acquire);
-        if old_writer {
-            return Err(());
-        }
-        self.0.fetch_add(1, Ordering::Release);
-        let writer_now = item.writer.load(Ordering::Acquire);
-        if writer_now {
-            self.0.fetch_sub(1, Ordering::Release);
-            Err(())
-        } else {
-            Ok(ReaderGuard {
-                shard: self,
-                ptr: item.data.cast(),
-                _life: PhantomData,
-            })
+    impl<'a, T> Copy for LockInput<'a, T> {}
+    impl<'a, T> Clone for LockInput<'a, T> {
+        fn clone(&self) -> Self {
+            *self
         }
     }
 
-    fn poll<'a, 'b>(
-        &'b self,
-        _input: <Self::PollSignature as Signature>::Input<'a>,
-    ) -> Result<
-        <Self::PollSignature as Signature>::Output<'a, 'b>,
-        <Self::PollSignature as Signature>::Error<'a, 'b>,
-    > {
-        Err(self.0.load(Ordering::Acquire))
+    /// Input to Collection::offer
+    #[expect(unnameable_types)]
+    pub struct ReaderShardOffer<T>(PhantomData<T>);
+
+    impl<T> Signature for ReaderShardOffer<T> {
+        type Error<'a, 'b>
+            = ()
+        where
+            Self: 'b;
+        type Input<'a> = LockInput<'a, T>;
+        type Output<'a, 'b>
+            = ReaderGuard<'a, 'b, T>
+        where
+            Self: 'b;
     }
 
-    fn len(&self) -> usize {
-        1
+    /// Input to Collection::poll
+    #[expect(unnameable_types)]
+    pub struct WritePoll<T>(PhantomData<T>);
+
+    impl<T> Signature for WritePoll<T> {
+        type Error<'a, 'b>
+            = usize
+        where
+            Self: 'b;
+        type Input<'a> = LockInput<'a, T>;
+        type Output<'a, 'b>
+            = WriteGuard<'a, T>
+        where
+            Self: 'b;
     }
 
-    fn capacity(&self) -> usize {
-        1
+    impl<T> Collection for ReaderShard<T> {
+        type OfferSignature = ReaderShardOffer<T>;
+        type PollSignature = WritePoll<T>;
+
+        fn offer<'b, 'a>(
+            &'b self,
+            item: <Self::OfferSignature as Signature>::Input<'a>,
+        ) -> Result<
+            <Self::OfferSignature as Signature>::Output<'a, 'b>,
+            <Self::OfferSignature as Signature>::Error<'a, 'b>,
+        > {
+            let old_writer = item.writer.load(Ordering::Acquire);
+            if old_writer {
+                return Err(());
+            }
+            self.0.fetch_add(1, Ordering::Release);
+            let writer_now = item.writer.load(Ordering::Acquire);
+            if writer_now {
+                self.0.fetch_sub(1, Ordering::Release);
+                Err(())
+            } else {
+                Ok(ReaderGuard {
+                    shard: self,
+                    ptr: item.data.cast(),
+                    _life: PhantomData,
+                })
+            }
+        }
+
+        fn poll<'a, 'b>(
+            &'b self,
+            _input: <Self::PollSignature as Signature>::Input<'a>,
+        ) -> Result<
+            <Self::PollSignature as Signature>::Output<'a, 'b>,
+            <Self::PollSignature as Signature>::Error<'a, 'b>,
+        > {
+            Err(self.0.load(Ordering::Acquire))
+        }
+
+        fn len(&self) -> usize {
+            1
+        }
+
+        fn capacity(&self) -> usize {
+            1
+        }
+
+        fn is_empty(&self) -> bool {
+            self.0.load(Ordering::Acquire) == 0
+        }
     }
 
-    fn is_empty(&self) -> bool {
-        self.0.load(Ordering::Acquire) == 0
-    }
-}
+    #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+    pub(crate) struct RwLockStrategy<S>(S);
 
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-struct RwLockStrategy<S>(S);
+    impl<T, S: Strategy<ReaderShard<T>>> Strategy<ReaderShard<T>> for RwLockStrategy<S> {
+        type Gambler = S::Gambler;
 
-impl<T, S: Strategy<ReaderShard<T>>> Strategy<ReaderShard<T>> for RwLockStrategy<S> {
-    type Gambler = S::Gambler;
+        fn choose_offer_arm(
+            &self,
+            state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
+            arm: &mut Self::Gambler,
+        ) -> usize {
+            self.0.choose_offer_arm(state, arm)
+        }
 
-    fn choose_offer_arm(
-        &self,
-        state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
-        arm: &mut Self::Gambler,
-    ) -> usize {
-        self.0.choose_offer_arm(state, arm)
-    }
+        fn choose_poll_arm(
+            &self,
+            state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
+            arm: &mut Self::Gambler,
+        ) -> usize {
+            self.0.choose_poll_arm(state, arm)
+        }
 
-    fn choose_poll_arm(
-        &self,
-        state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
-        arm: &mut Self::Gambler,
-    ) -> usize {
-        self.0.choose_poll_arm(state, arm)
-    }
+        fn fork_gambler(&self, arm: &mut Self::Gambler) -> Self::Gambler {
+            self.0.fork_gambler(arm)
+        }
 
-    fn fork_gambler(&self, arm: &mut Self::Gambler) -> Self::Gambler {
-        self.0.fork_gambler(arm)
-    }
+        fn create_gambler(&self) -> Self::Gambler {
+            self.0.create_gambler()
+        }
 
-    fn create_gambler(&self) -> Self::Gambler {
-        self.0.create_gambler()
-    }
-
-    fn collect<'b, 'c>(
-        &self,
-        _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
-        sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
-        input: <<ReaderShard<T> as Collection>::PollSignature as Signature>::Input<'b>,
-    ) -> Option<(
-        <<ReaderShard<T> as Collection>::PollSignature as Signature>::Output<'b, 'c>,
-        usize,
-    )>
-    where
-        ReaderShard<T>: 'c,
-    {
-        fn no_reader<'b, 'c, T>(
+        fn collect<'b, 'c>(
+            &self,
+            _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
             sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
-            input: LockInput<'b, T>,
-        ) -> bool {
-            sub_collections
-                .iter()
-                .all(|item| matches!(item.poll(input), Err(0)))
-        }
+            input: <<ReaderShard<T> as Collection>::PollSignature as Signature>::Input<'b>,
+        ) -> Option<(
+            <<ReaderShard<T> as Collection>::PollSignature as Signature>::Output<'b, 'c>,
+            usize,
+        )>
+        where
+            ReaderShard<T>: 'c,
+        {
+            fn no_reader<'b, 'c, T>(
+                sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
+                input: LockInput<'b, T>,
+            ) -> bool {
+                sub_collections
+                    .iter()
+                    .all(|item| matches!(item.poll(input), Err(0)))
+            }
 
-        if !no_reader(sub_collections, input) {
-            return None;
-        }
+            if !no_reader(sub_collections, input) {
+                return None;
+            }
 
-        if input.writer.swap(true, Ordering::AcqRel) {
-            return None;
-        }
+            if input.writer.swap(true, Ordering::AcqRel) {
+                return None;
+            }
 
-        if !no_reader(sub_collections, input) {
-            input.writer.store(false, Ordering::Release);
-            return None;
-        }
+            if !no_reader(sub_collections, input) {
+                input.writer.store(false, Ordering::Release);
+                return None;
+            }
 
-        Some((
-            WriteGuard {
-                b: input.writer,
-                ptr: input.data.cast(),
-            },
-            0,
-        ))
+            Some((
+                WriteGuard {
+                    b: input.writer,
+                    ptr: input.data.cast(),
+                },
+                0,
+            ))
+        }
     }
 }
 
@@ -371,8 +379,8 @@ where
 }
 
 /// A ShardedRwLock that is dynamically stored
-#[expect(type_alias_bounds)]
 #[cfg(feature = "alloc")]
+#[expect(type_alias_bounds)]
 pub type BoxedShardedRwLock<T, S: Strategy<ReaderShard<T>>> =
     ShardedRwLock<T, BoxedStorage<ReaderShard<T>>, BoxedStorage<<S::Gambler as Hooked>::Stake>, S>;
 
