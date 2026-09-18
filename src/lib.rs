@@ -446,7 +446,16 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use crate::sync::thread;
+
+    fn backoff() {
+        #[cfg(any(loom, shuttle))]
+        thread::yield_now();
+        #[cfg(not(any(loom, shuttle)))]
+        sync::hint::spin_loop();
+    }
 
     trait ForkeableRwLockImpl<'a, T> {
         fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>>;
@@ -470,45 +479,152 @@ mod tests {
         }
     }
 
-    fn smoke<'a, L>(lock: L)
+    #[cfg(not(any(loom, shuttle)))]
+    fn smoke<'a, L>(mut lock: L)
     where
         L: ForkeableRwLockImpl<'a, i32>,
     {
-        todo!()
+        let mut lock2 = lock.fork();
+
+        let r1 = lock2.read().unwrap();
+        let r2 = lock.read().unwrap();
+
+        assert_eq!(*r1, *r2);
+        let old = *r1;
+
+        drop(r2);
+        assert!(lock.write().is_none());
+        drop(r1);
+
+        let mut w = lock.write().unwrap();
+        *w += 1;
+
+        assert!(lock2.read().is_none());
+        drop(w);
+
+        assert_eq!(*lock.read().unwrap(), old + 1);
     }
 
-    fn many_reader<'a, L>(lock: L)
+    fn concurrent_read<'a, L>(mut lock: L)
     where
-        L: ForkeableRwLockImpl<'a, i32>,
+        L: ForkeableRwLockImpl<'a, usize> + Sync + Send + 'static,
     {
-        todo!()
+        #[cfg(not(loom))]
+        const THREADS: usize = 10;
+        #[cfg(loom)]
+        const THREADS: usize = 2;
+
+        #[cfg(not(any(loom, miri)))]
+        const ITER: usize = 10;
+        #[cfg(any(loom, miri))]
+        const ITER: usize = 2;
+
+        *lock.write().unwrap() = 1;
+
+        assert_eq!(
+            (0..THREADS)
+                .map(|_| {
+                    let mut r = lock.fork();
+                    thread::spawn(move || (0..ITER).map(|_| *r.read().unwrap()).sum::<usize>())
+                })
+                .map(|h| h.join().unwrap())
+                .sum::<usize>(),
+            THREADS * ITER
+        )
     }
 
-    fn send_sync<L>(_lock: L)
+    fn concurrent_write<'a, L>(mut lock: L)
     where
-        L: Send + Sync,
+        L: ForkeableRwLockImpl<'a, usize> + Sync + Send + 'static,
     {
+        #[cfg(not(loom))]
+        const THREADS: usize = 10;
+        #[cfg(loom)]
+        const THREADS: usize = 2;
+
+        #[cfg(not(any(loom, miri)))]
+        const ITER: usize = 10;
+        #[cfg(any(loom, miri))]
+        const ITER: usize = 2;
+
+        *lock.write().unwrap() = 0;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let mut r = lock.fork();
+                thread::spawn(move || {
+                    for _ in 0..ITER {
+                        loop {
+                            if let Some(mut l) = r.write() {
+                                *l += 1;
+                                break;
+                            }
+                            backoff();
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(*lock.read().unwrap(), THREADS * ITER)
     }
 
-    fn concurrent_read<'a, L>(lock: L)
+    fn concurrent_rw<'a, L>(mut lock: L)
     where
-        L: ForkeableRwLockImpl<'a, i32>,
+        L: ForkeableRwLockImpl<'a, usize> + Send + Sync + 'static,
     {
-        todo!()
-    }
+        #[cfg(not(loom))]
+        const THREADS: usize = 10;
+        #[cfg(loom)]
+        const THREADS: usize = 2;
 
-    fn concurrent_write<'a, L>(lock: L)
-    where
-        L: ForkeableRwLockImpl<'a, i32>,
-    {
-        todo!()
-    }
+        #[cfg(not(any(loom, miri)))]
+        const ITER: usize = 10;
+        #[cfg(any(loom, miri))]
+        const ITER: usize = 2;
 
-    fn concurrent_rw<'a, L>(lock: L)
-    where
-        L: ForkeableRwLockImpl<'a, i32>,
-    {
-        todo!()
+        *lock.write().unwrap() = 0;
+
+        let mut handles = Vec::new();
+
+        for _ in 0..THREADS / 2 {
+            let mut r = lock.fork();
+            handles.push(thread::spawn(move || {
+                for _ in 0..ITER {
+                    loop {
+                        if r.read().is_some() {
+                            break;
+                        }
+                        backoff();
+                    }
+                }
+            }));
+        }
+
+        for _ in 0..THREADS / 2 {
+            let mut r = lock.fork();
+            handles.push(thread::spawn(move || {
+                for _ in 0..ITER {
+                    loop {
+                        if let Some(mut l) = r.write() {
+                            *l += 1;
+                            break;
+                        }
+                        backoff();
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(*lock.read().unwrap(), THREADS / 2 * ITER);
     }
 
     #[cfg(all(not(loom), not(shuttle)))]
@@ -519,23 +635,8 @@ mod tests {
         use crate::tests::smoke;
 
         #[test]
-        fn send_sync_inline() {
-            send_sync(InlineShardedRwLock::<_, RoundRobin, 1>::new(0).new_root());
-        }
-
-        #[cfg(feature = "alloc")]
-        fn send_sync_boxed() {
-            send_sync(BoxedShardedRwLock::<_, RoundRobin>::new(1, 0).new_root());
-        }
-
-        #[test]
         fn smoke_impl() {
             smoke(InlineShardedRwLock::<_, RoundRobin, 10>::new(0).new_root());
-        }
-
-        #[test]
-        fn many_reader_impl() {
-            many_reader(InlineShardedRwLock::<_, RoundRobin, 10>::new(0).new_root());
         }
 
         #[test]
@@ -561,22 +662,30 @@ mod tests {
 
         #[test]
         fn concurrent_read_impl() {
-            concurrent_read(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root());
+            let lock = Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+            let r = lock.new_root();
+            concurrent_read(r);
         }
 
         #[test]
         fn concurrent_write_impl() {
-            concurrent_write(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root());
+            let lock = Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+            let r = lock.new_root();
+            concurrent_write(r);
         }
 
         #[test]
         fn concurrent_rw_impl() {
-            concurrent_rw(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root());
+            let lock = Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+            let r = lock.new_root();
+            concurrent_rw(r);
         }
     }
 
     #[cfg(shuttle)]
     mod shuttle {
+        use kasino::strategy::RandomAccess;
+
         use super::*;
 
         const ITER: usize = 100;
@@ -585,7 +694,13 @@ mod tests {
         #[test]
         fn concurrent_read_impl() {
             shuttle::check_pct(
-                || concurrent_read(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root()),
+                || {
+                    let lock =
+                        Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+                    let r = lock.new_root();
+
+                    concurrent_read(r)
+                },
                 ITER,
                 DEPTH,
             )
@@ -594,7 +709,12 @@ mod tests {
         #[test]
         fn concurrent_write_impl() {
             shuttle::check_pct(
-                || concurrent_write(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root()),
+                || {
+                    let lock =
+                        Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+                    let r = lock.new_root();
+                    concurrent_write(r)
+                },
                 ITER,
                 DEPTH,
             )
@@ -603,7 +723,12 @@ mod tests {
         #[test]
         fn concurrent_rw_impl() {
             shuttle::check_pct(
-                || concurrent_rw(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root()),
+                || {
+                    let lock =
+                        Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+                    let r = lock.new_root();
+                    concurrent_rw(r)
+                },
                 ITER,
                 DEPTH,
             )
@@ -611,27 +736,35 @@ mod tests {
     }
 
     #[cfg(loom)]
-    mod loom {
+    mod loom_tests {
+        use kasino::strategy::RandomAccess;
+
         use super::*;
 
         #[test]
         fn concurrent_read_impl() {
             loom::model(|| {
-                concurrent_read(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root())
+                let lock = Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+                let r = lock.new_root();
+                concurrent_read(r)
             })
         }
 
         #[test]
         fn concurrent_write_impl() {
             loom::model(|| {
-                concurrent_write(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root())
+                let lock = Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+                let r = lock.new_root();
+                concurrent_write(r)
             })
         }
 
         #[test]
         fn concurrent_rw_impl() {
             loom::model(|| {
-                concurrent_rw(InlineShardedRwLock::<_, RandomAccess, 10>::new(0).new_root())
+                let lock = Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
+                let r = lock.new_root();
+                concurrent_rw(r)
             })
         }
     }
