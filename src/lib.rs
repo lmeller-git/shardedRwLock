@@ -603,21 +603,21 @@ mod tests {
         let writer = thread::spawn(move || {
             for _ in 0..ITERS {
                 loop {
-                    if let Some(mut observed) = sync_w.write()
-                        && observed.iter().all(|entry| *entry)
-                    {
-                        *observed = [false; N_READERS];
+                    match sync_w.write() {
+                        Some(mut observed) if observed.iter().all(|entry| *entry) => {
+                            *observed = [false; N_READERS];
 
-                        loop {
-                            if let Some(mut data) = data_w.write() {
-                                *data += 1;
-                                break;
+                            loop {
+                                if let Some(mut data) = data_w.write() {
+                                    *data += 1;
+                                    break;
+                                }
+                                backoff();
                             }
-                            backoff();
+                            break;
                         }
-                        break;
+                        _ => backoff(),
                     }
-                    backoff();
                 }
             }
         });
@@ -631,28 +631,30 @@ mod tests {
                     let mut total = 0;
                     for _ in 0..ITERS {
                         loop {
-                            if let Some(observed) = sync_r.read()
-                                && !observed[i]
-                            {
-                                break;
+                            match sync_r.read() {
+                                Some(observed) if !observed[i] => break,
+                                _ => backoff(),
                             }
-                            backoff();
                         }
 
                         loop {
-                            if let Some(data) = data_r.read() {
-                                total += *data;
-                                break;
+                            match data_r.read() {
+                                Some(data) => {
+                                    total += *data;
+                                    break;
+                                }
+                                _ => backoff(),
                             }
-                            backoff();
                         }
 
                         loop {
-                            if let Some(mut observed) = sync_r.write() {
-                                observed[i] = true;
-                                break;
+                            match sync_r.write() {
+                                Some(mut observed) => {
+                                    observed[i] = true;
+                                    break;
+                                }
+                                _ => backoff(),
                             }
-                            backoff();
                         }
                     }
                     total
