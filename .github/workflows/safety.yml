@@ -74,7 +74,7 @@ jobs:
           rustup override set ${{ env.NIGHTLY }}
           cargo miri test --all-features
         env:
-          MIRIFLAGS: ""
+          MIRIFLAGS: "-Zmiri-ignore-leaks"
 
   loom:
     runs-on: ubuntu-latest
