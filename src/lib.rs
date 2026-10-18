@@ -30,7 +30,7 @@ use kasino::{
     Signature,
     WithCapacity,
     storage::StorageBackend,
-    strategy::{Hooked, Strategy},
+    strategy::{Hooked, Strategy, StrategyStakes},
 };
 #[cfg(feature = "alloc")]
 use kasino::{BoxedBandit, BoxedStorage};
@@ -234,7 +234,7 @@ mod sealed {
             self.0.choose_poll_arm(state, arm)
         }
 
-        fn fork_gambler(&self, arm: &mut Self::Gambler) -> Self::Gambler {
+        fn fork_gambler(&self, arm: &Self::Gambler) -> Self::Gambler {
             self.0.fork_gambler(arm)
         }
 
@@ -242,11 +242,12 @@ mod sealed {
             self.0.create_gambler()
         }
 
-        fn collect<'b, 'c>(
+        fn on_poll_fail<'b, 'c>(
             &self,
             _state: &impl StorageBackend<<Self::Gambler as Hooked>::Stake>,
             sub_collections: &'c impl StorageBackend<ReaderShard<T>>,
             input: <<ReaderShard<T> as Collection>::PollSignature as Signature>::Input<'b>,
+            _arm: &mut Self::Gambler,
         ) -> Option<(
             <<ReaderShard<T> as Collection>::PollSignature as Signature>::Output<'b, 'c>,
             usize,
@@ -291,7 +292,7 @@ mod sealed {
 pub struct ShardedRwLock<
     T,
     B: StorageBackend<ReaderShard<T>>,
-    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    C: StorageBackend<StrategyStakes<S, ReaderShard<T>>>,
     S: Strategy<ReaderShard<T>>,
 > {
     shards: Bandit<ReaderShard<T>, RwLockStrategy<S>, B, C, 1>,
@@ -302,7 +303,7 @@ pub struct ShardedRwLock<
 impl<T, B, C, S> ShardedRwLock<T, B, C, S>
 where
     B: StorageBackend<ReaderShard<T>>,
-    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    C: StorageBackend<StrategyStakes<S, ReaderShard<T>>>,
     S: Strategy<ReaderShard<T>>,
 {
     /// Acquires a new ShardedRwLockHandle to this object
@@ -319,7 +320,7 @@ where
 unsafe impl<T: Sync, B: Sync, C: Sync, S: Sync> Sync for ShardedRwLock<T, B, C, S>
 where
     B: StorageBackend<ReaderShard<T>>,
-    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    C: StorageBackend<StrategyStakes<S, ReaderShard<T>>>,
     S: Strategy<ReaderShard<T>>,
 {
 }
@@ -329,7 +330,7 @@ where
 unsafe impl<T: Send, B: Send, C: Send, S: Send> Send for ShardedRwLock<T, B, C, S>
 where
     B: StorageBackend<ReaderShard<T>>,
-    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    C: StorageBackend<StrategyStakes<S, ReaderShard<T>>>,
     S: Strategy<ReaderShard<T>>,
 {
 }
@@ -338,7 +339,7 @@ where
 pub struct ShardedRwLockHandle<'a, T, B, C, S: Strategy<ReaderShard<T>>>
 where
     B: StorageBackend<ReaderShard<T>>,
-    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    C: StorageBackend<StrategyStakes<S, ReaderShard<T>>>,
 {
     shards_handle: BanditHandle<'a, ReaderShard<T>, RwLockStrategy<S>, B, C, 1>,
     parent: &'a ShardedRwLock<T, B, C, S>,
@@ -347,7 +348,7 @@ where
 impl<'a, T, B, C, S: Strategy<ReaderShard<T>>> ShardedRwLockHandle<'a, T, B, C, S>
 where
     B: StorageBackend<ReaderShard<T>>,
-    C: StorageBackend<<S::Gambler as Hooked>::Stake>,
+    C: StorageBackend<StrategyStakes<S, ReaderShard<T>>>,
 {
     /// Attempts to acquire read only access to the data
     pub fn read(&mut self) -> Option<ReaderGuard<'a, '_, T>> {
@@ -381,8 +382,12 @@ where
 /// A ShardedRwLock that is dynamically stored
 #[cfg(feature = "alloc")]
 #[expect(type_alias_bounds)]
-pub type BoxedShardedRwLock<T, S: Strategy<ReaderShard<T>>> =
-    ShardedRwLock<T, BoxedStorage<ReaderShard<T>>, BoxedStorage<<S::Gambler as Hooked>::Stake>, S>;
+pub type BoxedShardedRwLock<T, S: Strategy<ReaderShard<T>>> = ShardedRwLock<
+    T,
+    BoxedStorage<ReaderShard<T>>,
+    BoxedStorage<StrategyStakes<S, ReaderShard<T>>>,
+    S,
+>;
 
 /// A handle to a BoxedShardedRwLock
 #[cfg(feature = "alloc")]
@@ -391,7 +396,7 @@ pub type BoxedShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>> = ShardedR
     'a,
     T,
     BoxedStorage<ReaderShard<T>>,
-    BoxedStorage<<S::Gambler as Hooked>::Stake>,
+    BoxedStorage<StrategyStakes<S, ReaderShard<T>>>,
     S,
 >;
 
@@ -399,6 +404,7 @@ pub type BoxedShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>> = ShardedR
 impl<T, S> BoxedShardedRwLock<T, S>
 where
     S: Strategy<ReaderShard<T>> + Default,
+    StrategyStakes<S, ReaderShard<T>>: Default,
 {
     /// Constructs a new BoxedShardedRwLock with shard count chsard_count
     pub fn new(shard_count: usize, item: T) -> Self {
@@ -415,7 +421,7 @@ where
 pub type InlineShardedRwLock<T, S: Strategy<ReaderShard<T>>, const N: usize> = ShardedRwLock<
     T,
     InlineStorage<ReaderShard<T>, N>,
-    InlineStorage<<S::Gambler as Hooked>::Stake, N>,
+    InlineStorage<StrategyStakes<S, ReaderShard<T>>, N>,
     S,
 >;
 
@@ -426,13 +432,14 @@ pub type InlineShardedRwLockHandle<'a, T, S: Strategy<ReaderShard<T>>, const N: 
         'a,
         T,
         InlineStorage<ReaderShard<T>, N>,
-        InlineStorage<<S::Gambler as Hooked>::Stake, N>,
+        InlineStorage<StrategyStakes<S, ReaderShard<T>>, N>,
         S,
     >;
 
 impl<T, S, const N: usize> InlineShardedRwLock<T, S, N>
 where
     S: Strategy<ReaderShard<T>> + Default,
+    StrategyStakes<S, ReaderShard<T>>: Default,
 {
     /// Constructs a new InlineShardedRwLock
     pub fn new(item: T) -> Self {
@@ -534,9 +541,9 @@ mod tests {
         *lock.write().unwrap() = 0;
         let mut h = lock.fork();
         let writer = thread::spawn(move || {
-            for i in 0..10 {
+            for _ in 0..10 {
                 if let Some(mut w) = h.write() {
-                    *w += i;
+                    *w += 1;
                 } else {
                     backoff();
                 }
@@ -546,8 +553,8 @@ mod tests {
         let reader = thread::spawn(move || {
             loop {
                 if let Some(r) = h2.read() {
-                    if *r == 45 {
-                        return 45;
+                    if *r == 10 {
+                        return 10;
                     }
                 } else {
                     backoff();

@@ -40,7 +40,7 @@ atomic-fallback = ["portable-atomic/fallback"]
 
 [dependencies]
 crossbeam-utils = { version = "0.8.21", default-features = false }
-kasino = "0.2.0"
+kasino = "0.3.0"
 portable-atomic = { version = "1.13.1", default-features = false, features = ["require-cas"] }
 
 [dev-dependencies]
