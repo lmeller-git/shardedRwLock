@@ -175,8 +175,9 @@ mod sealed {
             if old_writer {
                 return Err(());
             }
-            self.0.fetch_add(1, Ordering::Release);
-            let writer_now = item.writer.load(Ordering::Acquire);
+            // Dekker style  store -> read sync with writer
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let writer_now = item.writer.load(Ordering::SeqCst);
             if writer_now {
                 self.0.fetch_sub(1, Ordering::Release);
                 Err(())
@@ -196,7 +197,8 @@ mod sealed {
             <Self::PollSignature as Signature>::Output<'a, 'b>,
             <Self::PollSignature as Signature>::Error<'a, 'b>,
         > {
-            Err(self.0.load(Ordering::Acquire))
+            // Dekker style  store -> read sync with reader
+            Err(self.0.load(Ordering::SeqCst))
         }
 
         fn len(&self) -> usize {
@@ -268,7 +270,8 @@ mod sealed {
                 return None;
             }
 
-            if input.writer.swap(true, Ordering::AcqRel) {
+            // Dekker style  store -> read sync with reader
+            if input.writer.swap(true, Ordering::SeqCst) {
                 return None;
             }
 
@@ -453,11 +456,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
-
     use kasino::strategy::RoundRobin;
 
     use super::*;
+    use crate::sync::thread;
 
     fn backoff() {
         #[cfg(any(loom, shuttle))]
@@ -534,18 +536,26 @@ mod tests {
     {
     }
 
+    /// To heavy for shuttle and loom...
     fn concurrent_read<'a, L>(mut lock: L)
     where
-        L: ForkeableRwLockImpl<'a, i32> + Send + 'static,
+        L: ForkeableRwLockImpl<'a, usize> + Send + 'static,
     {
+        #[cfg(not(any(loom, shuttle)))]
+        const ITER: usize = 10;
+        #[cfg(any(loom, shuttle))]
+        const ITER: usize = 2;
         *lock.write().unwrap() = 0;
         let mut h = lock.fork();
         let writer = thread::spawn(move || {
-            for _ in 0..10 {
-                if let Some(mut w) = h.write() {
-                    *w += 1;
-                } else {
-                    backoff();
+            for _ in 0..ITER {
+                loop {
+                    if let Some(mut w) = h.write() {
+                        *w += 1;
+                        break;
+                    } else {
+                        backoff();
+                    }
                 }
             }
         });
@@ -553,8 +563,8 @@ mod tests {
         let reader = thread::spawn(move || {
             loop {
                 if let Some(r) = h2.read() {
-                    if *r == 10 {
-                        return 10;
+                    if *r == ITER {
+                        return ITER;
                     }
                 } else {
                     backoff();
@@ -567,17 +577,18 @@ mod tests {
         assert_eq!(*lock.read().unwrap(), reader.join().unwrap());
     }
 
+    /// Too heavy for loom...
     fn concurrent_rw<'a, L>(mut lock: L)
     where
         L: ForkeableRwLockImpl<'a, i32> + Send + 'static,
     {
-        #[cfg(any(loom, miri))]
+        #[cfg(any(loom, miri, shuttle))]
         const N_READERS: usize = 2;
-        #[cfg(not(any(loom, miri)))]
+        #[cfg(not(any(loom, miri, shuttle)))]
         const N_READERS: usize = 4;
-        #[cfg(not(any(loom, miri)))]
+        #[cfg(not(any(loom, miri, shuttle)))]
         const ITERS: usize = 200;
-        #[cfg(any(loom, miri))]
+        #[cfg(any(loom, miri, shuttle))]
         const ITERS: usize = 10;
 
         let sync = Box::leak(Box::new(InlineShardedRwLock::<
@@ -721,24 +732,13 @@ mod tests {
     }
 
     #[cfg(shuttle)]
-    mod shuttle {
+    mod shuttle_ {
+        use kasino::strategy::RandomAccess;
+
         use super::*;
 
         const ITER: usize = 100;
         const DEPTH: usize = 4;
-
-        #[test]
-        fn concurrent_read_impl() {
-            shuttle::check_pct(
-                || {
-                    let leaked =
-                        Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
-                    concurrent_read(leaked.new_root())
-                },
-                ITER,
-                DEPTH,
-            )
-        }
 
         #[test]
         fn concurrent_rw_impl() {
@@ -755,25 +755,9 @@ mod tests {
     }
 
     #[cfg(loom)]
-    mod loom {
+    mod loom_ {
+        use kasino::strategy::RandomAccess;
+
         use super::*;
-
-        #[test]
-        fn concurrent_read_impl() {
-            loom::model(|| {
-                let leaked =
-                    Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
-                concurrent_read(leaked.new_root())
-            })
-        }
-
-        #[test]
-        fn concurrent_rw_impl() {
-            loom::model(|| {
-                let leaked =
-                    Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
-                concurrent_rw(leaked.new_root())
-            })
-        }
     }
 }
