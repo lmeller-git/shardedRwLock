@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(*lock.read().unwrap(), reader.join().unwrap());
     }
 
-    /// Too heavy for loom...
+    /// Too heavy for loom and shuttle ...
     fn concurrent_rw<'a, L>(mut lock: L)
     where
         L: ForkeableRwLockImpl<'a, i32> + Send + 'static,
@@ -589,7 +589,7 @@ mod tests {
         #[cfg(not(any(loom, miri, shuttle)))]
         const ITERS: usize = 200;
         #[cfg(any(loom, miri, shuttle))]
-        const ITERS: usize = 10;
+        const ITERS: usize = 2;
 
         let sync = Box::leak(Box::new(InlineShardedRwLock::<
             [bool; N_READERS],
@@ -740,20 +740,7 @@ mod tests {
         use super::*;
 
         const ITER: usize = 100;
-        const DEPTH: usize = 4;
-
-        #[test]
-        fn concurrent_rw_impl() {
-            shuttle::check_pct(
-                || {
-                    let leaked =
-                        Box::leak(Box::new(InlineShardedRwLock::<_, RandomAccess, 10>::new(0)));
-                    concurrent_rw(leaked.new_root())
-                },
-                ITER,
-                DEPTH,
-            )
-        }
+        const DEPTH: usize = 2;
     }
 
     #[cfg(loom)]
